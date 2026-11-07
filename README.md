@@ -64,18 +64,6 @@ Changes in the ini apply the next time the game starts.
 3. Copy `User_9000000000000` from the backup you want (`AutoBackupSaveGame\Backups\1A96545B\<date>_<time>\`) into `player-1`.
 4. Start the game.
 
-## Commands
-
-Through the platform's command tool (`fh2mod.exe`, in the platform zip's `tools` folder), while the game runs:
-
-```
-fh2mod AutoBackupSaveGame backup          # back up now (if the save changed)
-fh2mod AutoBackupSaveGame backup force    # back up now, even if it hasn't
-fh2mod AutoBackupSaveGame status          # the settings, the backups and the last result
-```
-
-Each backup is also written to `fh2-mods\platform.log`.
-
 ## Building
 
 You need CMake and Visual Studio 2022. The FH2 Mod Platform is a submodule:
