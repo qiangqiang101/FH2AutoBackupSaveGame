@@ -1,0 +1,105 @@
+name: Build
+
+# Builds AutoBackupSaveGame.dll and the FH2 Mod Platform it ships with, and packs them the way they go into the
+# Azimuth folder:
+#   DWrite.dll                         the FH2 Mod Platform (next to azimuth.exe; Azimuth 1.0.1 and later load it)
+#   fh2-mods/AutoBackupSaveGame.dll    the mod
+#   README.md, LICENSE*.txt            the README, the mod's license and MinHook's (the platform includes it)
+#
+# Run by hand (Actions > Build > Run workflow): the zip is uploaded as an artifact of the run.
+# Publishing a release: the zip is attached to it as AutoBackupSaveGame-<tag>.zip. The tag has to match the VERSION
+# in CMakeLists.txt (v1.0.0 or 1.0.0 for 1.0.0), as that's the version the mod reports and the platform compares
+# with GitHub's.
+#
+# The mod builds with MSVC, so this runs on Windows. The platform builds with llvm-mingw (Clang), as in its repo.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: write   # attaching the zip to the release
+    env:
+      LLVM_MINGW_VERSION: "20261020"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Name the build
+        id: name
+        shell: bash
+        run: |
+          version=$(sed -n 's/^project([^ ]* VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "CMakeLists.txt version: $version"
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            tag="${GITHUB_REF_NAME#[vV]}"
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::Release tag $GITHUB_REF_NAME doesn't match VERSION $version in CMakeLists.txt; bump it first."
+              exit 1
+            fi
+            echo "name=AutoBackupSaveGame-${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=AutoBackupSaveGame-v${version}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the mod (MSVC)
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release
+
+      - name: Install llvm-mingw + ninja
+        shell: pwsh
+        run: |
+          $v = $env:LLVM_MINGW_VERSION
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/$v/llvm-mingw-$v-ucrt-x86_64.zip" -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath "$env:RUNNER_TEMP"
+          "$env:RUNNER_TEMP\llvm-mingw-$v-ucrt-x86_64\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          python -m pip install ninja
+
+      - name: Build the platform (llvm-mingw)
+        shell: pwsh
+        run: |
+          # An absolute path: CMake looks for a relative toolchain file under the build folder first.
+          $toolchain = "$PWD/platform/cmake/mingw-w64-x86_64.cmake" -replace '\\', '/'
+          cmake -S platform -B build-platform -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
+          cmake --build build-platform --target fh2mod_platform
+
+      - name: Stage the zip's contents
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist/fh2-mods
+          cp build-platform/DWrite.dll dist/
+          cp build/Release/AutoBackupSaveGame.dll dist/fh2-mods/
+          cp LICENSE dist/LICENSE.txt
+          cp platform/third_party/minhook/LICENSE.txt dist/LICENSE-MinHook.txt
+          cp README.md dist/README.md
+          if [ -e dist/d3dcompiler_47.dll ]; then echo "::error::d3dcompiler_47.dll must not ship"; exit 1; fi
+          (cd dist && find . -type f | sort)
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\* -DestinationPath "${{ steps.name.outputs.name }}.zip" -CompressionLevel Optimal
+
+      - name: Upload as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ steps.name.outputs.name }}.zip" --repo "$GITHUB_REPOSITORY" --clobber
